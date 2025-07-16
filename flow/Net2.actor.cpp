@@ -2007,7 +2007,7 @@ void Net2::getDiskBytes(std::string const& directory, int64_t& free, int64_t& to
 #include <sched.h>
 #endif
 
-ASIOReactor::ASIOReactor(Net2* net) : do_not_stop(ios), network(net), firstTimer(ios) {
+ASIOReactor::ASIOReactor(Net2* net) : do_not_stop(ios.get_executor()), network(net), firstTimer(ios) {
 #ifdef __linux__
 	// Reactor flags are used only for experimentation, and are platform-specific
 	if (FLOW_KNOBS->REACTOR_FLAGS & 1) {
