@@ -42,9 +42,8 @@ public:
 
 	void wake();
 
-	boost::asio::io_service ios;
-	boost::asio::io_service::work
-	    do_not_stop; // Reactor needs to keep running when there is nothing to do until stopped explicitly
+	boost::asio::io_context ios;
+	boost::asio::executor_work_guard<boost::asio::io_context::executor_type> do_not_stop;
 
 private:
 	Net2* network;
