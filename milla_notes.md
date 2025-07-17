@@ -2,7 +2,7 @@
 
 JAVA_HOME=/System/Volumes/Data/Users/millas/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home cmake -DUSE_WERROR=ON -DFORCE_BOOST_BUILD=ON -DCMAKE_CXX_FLAGS="-DBOOST_ASIO_ENABLE_OLD_SERVICES -DBOOST_BIND_GLOBAL_PLACEHOLDERS" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -G Ninja ..
 
-JAVA_HOME=/System/Volumes/Data/Users/millas/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home cmake -DUSE_WERROR=ON  -DBOOST_ROOT=/opt/homebrew/Cellar/boost/1.60.0 -DFORCE_BOOST_BUILD=OFF  -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -G Ninja ..
+JAVA_HOME=/System/Volumes/Data/Users/millas/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home cmake -DUSE_WERROR=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -G Ninja ..
 
 ## Run Ninja
 ninja
