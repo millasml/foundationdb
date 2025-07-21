@@ -1,0 +1,34 @@
+
+===== Starting S3 Backup Encryption Test (Interactive Mode) =====
+
+
+=====================================
+Press Enter to continue to next step...
+=====================================
+
+Continuing...
+
+Setting up environment...
+
+=====================================
+Press Enter to continue to next step...
+=====================================
+
+Continuing...
+
+2025-07-18T18:03:02+08:00 Testing against seaweedfs with file encryption
+
+=====================================
+Press Enter to continue to next step...
+=====================================
+
+Continuing...
+
+Running: create_encryption_key_file /var/folders/xr/h4bw4_815lgblc2l00njz26d08bz9g/T//test_encryption_key_file
+Creating encryption key file at /var/folders/xr/h4bw4_815lgblc2l00njz26d08bz9g/T//test_encryption_key_file...
+2025-07-18T18:03:41+08:00 Created encryption key file at /var/folders/xr/h4bw4_815lgblc2l00njz26d08bz9g/T//test_encryption_key_file
+
+=====================================
+Press Enter to continue to next step...
+=====================================
+
