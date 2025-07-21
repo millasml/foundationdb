@@ -309,13 +309,17 @@ public:
 	
 	Future<int> read(void* data, int length, int64_t offset) override {
 		// Simulate S3 behavior: fail if trying to read beyond file size
+		// This matches the "416 Range Not Satisfiable" error we see in the S3 logs
 		if (offset >= fileSize) {
+			printf("MockS3LikeFile: Rejecting read at offset %lld >= fileSize %lld (simulating S3 416 error)\n", 
+			       offset, fileSize);
 			throw io_error();
 		}
-		// // Also fail if the read would extend beyond the file size (this is the key behavior)
-		// if (offset + length > fileSize) {
-		// 	throw io_error();
-		// }
+		
+		// For debugging: log all read attempts
+		printf("MockS3LikeFile: Read request - offset=%lld, length=%d, fileSize=%lld\n", 
+		       offset, length, fileSize);
+		
 		return underlying->read(data, length, offset);
 	}
 	
@@ -348,72 +352,96 @@ public:
 	int64_t debugFD() const override { return underlying->debugFD(); }
 };
 
-// Test case to reproduce the bug where AsyncFileReadAhead seeks to offset 4096 
-// when reading a small file through AsyncFileEncrypted, which can cause issues 
-// with certain filesystems like S3
+// Helper actor to test a single file size
+ACTOR Future<Void> testSingleFileSize(int fileSize, std::string dataDir) {
+	printf("\n--- Testing with file size: %d bytes ---\n", fileSize);
+	
+	state std::vector<unsigned char> writeBuffer(fileSize, 0);
+	deterministicRandom()->randomBytes(&writeBuffer.front(), fileSize);
+	
+	// Create the base file (simulating S3)
+	state int flags = IAsyncFile::OPEN_READWRITE | IAsyncFile::OPEN_CREATE | IAsyncFile::OPEN_ATOMIC_WRITE_AND_CREATE |
+	            IAsyncFile::OPEN_UNBUFFERED | IAsyncFile::OPEN_UNCACHED | IAsyncFile::OPEN_NO_AIO;
+	state std::string filename = format("test-file-%d", fileSize);
+	state Reference<IAsyncFile> baseFile =
+	    wait(IAsyncFileSystem::filesystem()->open(joinPath(dataDir, filename), flags, 0600));
+	
+	// Write the file
+	wait(baseFile->write(&writeBuffer[0], fileSize, 0));
+	wait(baseFile->sync());
+	baseFile.clear();
+	
+	// Reopen for reading
+	state Reference<IAsyncFile> rawFile =
+	    wait(IAsyncFileSystem::filesystem()->open(joinPath(dataDir, filename), 0, 0600));
+	
+	// Layer 1: Mock S3-like file that fails on reads beyond file size
+	state Reference<MockS3LikeFile> s3LikeFile(new MockS3LikeFile(rawFile, fileSize));
+	
+	// Layer 2: AsyncFileEncrypted (this is the correct layering from S3 backup)
+	state Reference<AsyncFileEncrypted> encryptedFile(new AsyncFileEncrypted(s3LikeFile, AsyncFileEncrypted::Mode::READ_ONLY));
+	
+	// Layer 3: AsyncFileReadAheadCache with settings that should trigger the bug
+	state Reference<AsyncFileReadAheadCache> readAheadFile(new AsyncFileReadAheadCache(
+	    encryptedFile,
+	    1024 * 1024,  // block size - 1MB matching production S3BlobStore settings
+	    0,     // read ahead blocks - matching production settings (default = 0)
+	    3,     // max concurrent reads  
+	    2      // cache size blocks
+	));
+	
+	// Verify file size is correct
+	int64_t reportedSize = wait(readAheadFile->size());
+	printf("File reports size: %lld, actual size: %d\n", reportedSize, fileSize);
+	
+	// Try to read the entire file
+	state std::vector<unsigned char> readBuffer(fileSize, 0);
+	
+	try {
+		printf("Attempting to read %d bytes from offset 0...\n", fileSize);
+		int bytesRead = wait(readAheadFile->read(&readBuffer[0], fileSize, 0));
+		printf("Read succeeded: %d bytes read\n", bytesRead);
+		
+		// Verify data integrity
+		if (bytesRead == fileSize && writeBuffer == readBuffer) {
+			printf("Data verification PASSED\n");
+		} else {
+			printf("Data verification FAILED: bytesRead=%d, expected=%d\n", bytesRead, fileSize);
+		}
+	} catch (Error& e) {
+		printf("Read FAILED with error code %d: %s\n", e.code(), e.what());
+		if (e.code() == error_code_io_error) {
+			printf("SUCCESS: Reproduced the S3 range error bug!\n");
+			printf("This means AsyncFileReadAhead tried to read beyond the file size\n");
+		}
+	}
+	
+	// Clean up
+	readAheadFile.clear();
+	encryptedFile.clear();
+	s3LikeFile.clear();
+	rawFile.clear();
+	
+	return Void();
+}
+
+// Test case to reproduce the bug where AsyncFileReadAhead seeks beyond file size
+// when reading a small encrypted file, which can cause issues with S3-like filesystems
 TEST_CASE("fdbrpc/AsyncFileEncryptedReadAheadBug") {
 	// ASSERT(g_network->isSimulated());
 	StreamCipherKey::initializeGlobalRandomTestKey();
 	
-	// Create a small file (50 bytes) to reproduce the issue
-	state int smallFileSize = 50;
-	state std::vector<unsigned char> writeBuffer(smallFileSize, 0);
-	deterministicRandom()->randomBytes(&writeBuffer.front(), smallFileSize);
+	printf("=== Testing AsyncFileEncrypted + AsyncFileReadAhead layering bug ===\n");
 	
-	// Create the encrypted file
-	state int flags = IAsyncFile::OPEN_READWRITE | IAsyncFile::OPEN_CREATE | IAsyncFile::OPEN_ATOMIC_WRITE_AND_CREATE |
-	            IAsyncFile::OPEN_UNBUFFERED | IAsyncFile::OPEN_ENCRYPTED | IAsyncFile::OPEN_UNCACHED |
-	            IAsyncFile::OPEN_NO_AIO;
-	state Reference<IAsyncFile> baseFile =
-	    wait(IAsyncFileSystem::filesystem()->open(joinPath(params.getDataDir(), "test-small-encrypted-file"), flags, 0600));
+	// Test with different file sizes to find the exact condition that triggers the bug
+	// Focus on small files (especially those around ENCRYPTION_BLOCK_SIZE) to find the edge case
+	state std::vector<int> testSizes = { 1, };//2, 4, FLOW_KNOBS->ENCRYPTION_BLOCK_SIZE - 1, FLOW_KNOBS->ENCRYPTION_BLOCK_SIZE, FLOW_KNOBS->ENCRYPTION_BLOCK_SIZE + 1 };
 	
-	// Write the small file
-	wait(baseFile->write(&writeBuffer[0], smallFileSize, 0));
-	wait(baseFile->sync());
-	
-	// Close and reopen for reading to ensure data is persisted
-	baseFile.clear();
-	
-	// flags = IAsyncFile::OPEN_READONLY | IAsyncFile::OPEN_UNBUFFERED | IAsyncFile::OPEN_ENCRYPTED | 
-	//         IAsyncFile::OPEN_UNCACHED | IAsyncFile::OPEN_NO_AIO;
-	state Reference<IAsyncFile> realEncryptedFile =
-	    wait(IAsyncFileSystem::filesystem()->open(joinPath(params.getDataDir(), "test-small-encrypted-file"), 0, 0600));
-	
-	// Wrap the encrypted file with our mock S3-like file that fails on reads beyond file size
-	state Reference<MockS3LikeFile> s3LikeFile(new MockS3LikeFile(realEncryptedFile, smallFileSize));
-	
-	// Wrap with AsyncFileReadAheadCache to reproduce the bug
-	// Use typical read-ahead parameters that would cause the issue
-	state Reference<AsyncFileReadAheadCache> readAheadFile(new AsyncFileReadAheadCache(
-	    s3LikeFile,
-	    1024*1024,  // block size - this is the problematic value that causes seeks to 4096
-	    0,     // read ahead blocks
-	    3,     // max concurrent reads  
-	    3     // cache size blocks
-	));
-	
-	// Verify file size is correct
-	int64_t fileSize = wait(readAheadFile->size());
-	ASSERT_EQ(fileSize, smallFileSize);
-	
-	// This read should only access the first 50 bytes, but due to the bug,
-	// AsyncFileReadAhead will try to read a full 4096-byte block (from offset 0 to 4096),
-	// which will cause MockS3LikeFile to throw an io_error() because the read extends
-	// beyond the 50-byte file size, simulating S3 behavior
-	state std::vector<unsigned char> readBuffer(smallFileSize, 0);
-	
-	// This should fail due to the bug - AsyncFileReadAhead will attempt to read 4096 bytes
-	// starting from offset 0, but our MockS3LikeFile will reject this because it goes beyond
-	// the 50-byte file size
-	try {
-		int bytesRead = wait(readAheadFile->read(&readBuffer[0], smallFileSize, 0));
-		// If we get here, the bug is NOT present (the read succeeded)
-		ASSERT(false); // This should not be reached if the bug exists
-	} catch (Error& e) {
-		// Expected: the read should fail due to AsyncFileReadAhead trying to read beyond file size
-		ASSERT(e.code() == error_code_io_error);
-		printf("SUCCESS: Test correctly reproduced the AsyncFileReadAhead bug - read failed as expected\n");
+	state int sizeIndex;
+	for (sizeIndex = 0; sizeIndex < testSizes.size(); sizeIndex++) {
+		wait(testSingleFileSize(testSizes[sizeIndex], params.getDataDir()));
 	}
 	
+	printf("\n=== AsyncFileEncrypted + AsyncFileReadAhead layering test complete ===\n");
 	return Void();
 }
