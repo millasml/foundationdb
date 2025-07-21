@@ -80,6 +80,10 @@ if(APPLE)
 add_definitions(-D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION)
 endif()
 
+# Fix for std::unary_function being removed in C++17
+# This tells boost to use its alternative implementation
+add_definitions(-DBOOST_NO_CXX98_FUNCTION_BASE)
+
 if (USE_CCACHE)
   find_program(CCACHE_PROGRAM "ccache" REQUIRED)
   set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
@@ -422,6 +426,9 @@ else()
     # Graviton2 or later
     # https://github.com/aws/aws-graviton-gettting-started
     add_compile_options(-march=armv8.2-a+crc+simd)
+    
+    # Add stricter alignment requirements for ARM64 to fix pointer alignment issues
+    add_compile_options(-mstrict-align)
   endif()
 
   if (CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64le")
