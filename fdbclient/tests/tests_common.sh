@@ -126,11 +126,16 @@ function verify_data {
   local local_build_dir="${1}"
   local local_scratch_dir="${2}"
   local value
+
+  echo $local_scratch_dir
+
+  echo "Verifying data in fdb, printing data to verify"
   for (( i=0; i<"${#FDB_DATA[@]}"; i++)); do
     value=$("${local_build_dir}/bin/fdbcli" \
       -C "${local_scratch_dir}/loopback_cluster/fdb.cluster" \
       --exec "get $(make_key "${i}")" | \
       sed -e "s/.*is [[:punct:]]//" | sed -e "s/[[:punct:]]*$//")
+    echo $value
     if [[ "${FDB_DATA[i]}" != "${value}" ]]; then
       err "${FDB_DATA[i]} is not equal to ${value}"
       return 1

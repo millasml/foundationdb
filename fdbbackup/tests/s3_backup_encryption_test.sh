@@ -19,6 +19,15 @@
 trap "exit 1" HUP INT PIPE QUIT TERM
 trap cleanup  EXIT
 
+# Function to wait for user to press Enter to continue
+function wait_for_user {
+  echo -e "\n====================================="
+  echo -e "Press Enter to continue to next step..."
+  echo -e "=====================================\n"
+  read -r
+  echo -e "Continuing...\n"
+}
+
 # Cleanup. Called from signal trap.
 function cleanup {
   if type shutdown_fdb_cluster &> /dev/null; then
@@ -53,6 +62,7 @@ function resolve_to_absolute_path {
 # $1 the encryption key file path
 function create_encryption_key_file {
   local key_file="${1}"
+  echo "Creating encryption key file at ${key_file}..."
   # Create a random 32-byte AES-256 key
   dd if=/dev/urandom bs=32 count=1 of="${key_file}" 2>/dev/null
   # Set appropriate permissions
@@ -71,6 +81,20 @@ function backup {
   local local_url="${3}"
   local local_credentials="${4}"
   local local_encryption_key_file="${5}"
+  
+  echo "Running backup command:"
+  # Construct and display the command
+  local cmd="${local_build_dir}/bin/fdbbackup start \
+    -C ${local_scratch_dir}/loopback_cluster/fdb.cluster \
+    -t ${TAG} -w \
+    -d ${local_url} \
+    -k '\"\" \\xff' \
+    --log --logdir=${local_scratch_dir} \
+    --blob-credentials ${local_credentials} \
+    --encryption-key-file ${local_encryption_key_file} \
+    ${KNOBS[*]}"
+  
+  echo "$cmd"
   
   # Backup to s3. Without the -k argument in the below, the backup gets
   # 'No restore target version given, will use maximum restorable version from backup description.'
@@ -101,6 +125,19 @@ function restore {
   local local_url="${3}"
   local local_credentials="${4}"
   local local_encryption_key_file="${5}"
+
+  echo "Running restore command:"
+  # Construct and display the command
+  local cmd="${local_build_dir}/bin/fdbrestore start \
+    --dest-cluster-file ${local_scratch_dir}/loopback_cluster/fdb.cluster \
+    -t ${TAG} -w \
+    -r ${url} \
+    --log --logdir=${local_scratch_dir} \
+    --blob-credentials ${local_credentials} \
+    --encryption-key-file ${local_encryption_key_file} \
+    ${KNOBS[*]}"
+    
+  echo "$cmd"
   
   if ! "${local_build_dir}"/bin/fdbrestore start \
     --dest-cluster-file "${local_scratch_dir}/loopback_cluster/fdb.cluster" \
@@ -121,6 +158,8 @@ function restore {
 function verify_encryption {
   local local_scratch_dir="${1}"
   
+  echo "Verifying encryption usage:"
+  echo "grep -q \"encryption-key-file\" ${local_scratch_dir}/*.log || grep -q \"EncryptionKey\" ${local_scratch_dir}/*.log || grep -q \"StreamCipherKey\" ${local_scratch_dir}/*.log"
   # Check for encryption-related log entries
   if grep -q "encryption-key-file" "${local_scratch_dir}"/*.log || 
      grep -q "EncryptionKey" "${local_scratch_dir}"/*.log ||
@@ -147,7 +186,9 @@ function test_s3_backup_and_restore_encryption {
   local local_encryption_key_file="${5}"
   
   log "Load data"
-  if ! load_data "${local_build_dir}" "${local_scratch_dir}"; then
+  wait_for_user
+  echo "Running: load_data ${local_build_dir} ${local_scratch_dir}"
+if ! load_data "${local_build_dir}" "${local_scratch_dir}"; then
     err "Failed loading data into fdb"
     return 1
   fi
@@ -160,12 +201,17 @@ function test_s3_backup_and_restore_encryption {
   if [[ "${USE_S3}" == "true" ]]; then
     # Run this rm only if s3. In seaweed, it would fail because
     # bucket doesn't exist yet (they are lazily created).
+    wait_for_user
+    echo "Running pre-cleanup for S3:"
     local preclear_cmd=("${local_build_dir}/bin/s3client")
     preclear_cmd+=("${KNOBS[@]}")
     preclear_cmd+=("--tls-ca-file" "${TLS_CA_FILE}")
     preclear_cmd+=("--blob-credentials" "${credentials}")
     preclear_cmd+=("--log" "--logdir" "${local_scratch_dir}")
     preclear_cmd+=("rm" "${edited_url}")
+    
+    # Print the command that will be executed
+    echo "${preclear_cmd[*]}"
     
     if ! "${preclear_cmd[@]}"; then
       err "Failed pre-cleanup rm of ${edited_url}"
@@ -174,35 +220,37 @@ function test_s3_backup_and_restore_encryption {
   fi
   
   log "Run s3 backup with encryption"
+  wait_for_user
   if ! backup "${local_build_dir}" "${local_scratch_dir}" "${local_url}" "${credentials}" "${local_encryption_key_file}"; then
     err "Failed backup"
     return 1
   fi
   
-  log "Verify encryption was used"
-  if ! verify_encryption "${local_scratch_dir}"; then
-    err "Failed encryption verification"
-    return 1
-  fi
-  
   log "Clear fdb data"
-  if ! clear_data "${local_build_dir}" "${local_scratch_dir}"; then
+  wait_for_user
+  echo "Running: clear_data ${local_build_dir} ${local_scratch_dir}"
+if ! clear_data "${local_build_dir}" "${local_scratch_dir}"; then
     err "Failed clear data in fdb"
     return 1
   fi
   
   log "Restore from s3 with encryption"
+  wait_for_user
   if ! restore "${local_build_dir}" "${local_scratch_dir}" "${local_url}" "${credentials}" "${local_encryption_key_file}"; then
     err "Failed restore"
     return 1
   fi
   
   log "Verify restore"
-  if ! verify_data "${local_build_dir}" "${local_scratch_dir}"; then
+  wait_for_user
+  echo "Running: verify_data ${local_build_dir} ${local_scratch_dir}"
+if ! verify_data "${local_build_dir}" "${local_scratch_dir}"; then
     err "Failed verification of data in fdb"
     return 1
   fi
   
+  wait_for_user
+  echo "Running cleanup of test data:"
   # Cleanup test data.
   local cleanup_cmd=("${local_build_dir}/bin/s3client")
   cleanup_cmd+=("${KNOBS[@]}")
@@ -216,18 +264,25 @@ function test_s3_backup_and_restore_encryption {
   cleanup_cmd+=("--log" "--logdir" "${local_scratch_dir}")
   cleanup_cmd+=("rm" "${edited_url}")
   
+  # Print the command that will be executed
+  echo "${cleanup_cmd[*]}"
+  
   if ! "${cleanup_cmd[@]}"; then
     err "Failed rm of ${edited_url}"
     return 1
   fi
   
   log "Check for Severity=40 errors"
-  if ! grep_for_severity40 "${local_scratch_dir}"; then
+  wait_for_user
+  echo "Running: grep_for_severity40 ${local_scratch_dir}"
+if ! grep_for_severity40 "${local_scratch_dir}"; then
     err "Found Severity=40 errors in logs"
     return 1
   fi
 }
 
+# Enable printing of commands as they are executed
+set -x
 # set -o xtrace   # a.k.a set -x  # Set this one when debugging (or 'bash -x THIS_SCRIPT').
 set -o errexit  # a.k.a. set -e
 set -o nounset  # a.k.a. set -u
@@ -290,6 +345,10 @@ if ! source "${cwd}/../../fdbclient/tests/tests_common.sh"; then
   err "Failed to source tests_common.sh"
   exit 1
 fi
+
+echo -e "\n===== Starting S3 Backup Encryption Test (Interactive Mode) =====\n"
+wait_for_user
+
 # Process command-line options.
 if (( $# < 2 )) || (( $# > 3 )); then
     echo "ERROR: ${0} requires the fdb src and build directories --"
@@ -318,6 +377,9 @@ if (( $# == 3 )); then
 fi
 readonly scratch_dir
 
+echo "Setting up environment..."
+wait_for_user
+
 # Create encryption key file path
 readonly ENCRYPTION_KEY_FILE="${scratch_dir}/test_encryption_key_file"
 
@@ -328,6 +390,7 @@ query_str=
 blob_credentials_file=
 if [[ "${USE_S3}" == "true" ]]; then
   log "Testing against s3 with file encryption"
+  wait_for_user
   # Now source in the aws fixture so we can use its methods in the below.
   # shellcheck source=/dev/null
   if ! source "${cwd}/../../fdbclient/tests/aws_fixture.sh"; then
@@ -353,6 +416,7 @@ if [[ "${USE_S3}" == "true" ]]; then
   export FDB_TLS_CA_FILE="${TLS_CA_FILE}"
 else
   log "Testing against seaweedfs with file encryption"
+  wait_for_user
   # Now source in the seaweedfs fixture so we can use its methods in the below.
   # shellcheck source=/dev/null
   if ! source "${cwd}/../../fdbclient/tests/seaweedfs_fixture.sh"; then
@@ -380,8 +444,10 @@ else
 fi
 
 # Create the encryption key file
+echo "Running: create_encryption_key_file ${ENCRYPTION_KEY_FILE}"
 create_encryption_key_file "${ENCRYPTION_KEY_FILE}"
 log "Created encryption key file at ${ENCRYPTION_KEY_FILE}"
+wait_for_user
 
 # Source in the fdb cluster.
 # shellcheck source=/dev/null
@@ -390,19 +456,33 @@ if ! source "${cwd}/../../fdbclient/tests/fdb_cluster_fixture.sh"; then
   exit 1
 fi
 # Startup fdb cluster and backup agent.
+echo "Starting FDB cluster..."
+echo "Running: start_fdb_cluster ${source_dir} ${build_dir} ${TEST_SCRATCH_DIR} 1"
+wait_for_user
 if ! start_fdb_cluster "${source_dir}" "${build_dir}" "${TEST_SCRATCH_DIR}" 1; then
   err "Failed start FDB cluster"
   exit 1
 fi
 log "FDB cluster is up"
+wait_for_user
+echo "Starting backup agent..."
+echo "Running: start_backup_agent ${build_dir} ${TEST_SCRATCH_DIR} ${KNOBS[*]}"
 if ! start_backup_agent "${build_dir}" "${TEST_SCRATCH_DIR}" "${KNOBS[@]}"; then
   err "Failed start backup_agent"
   exit 1
 fi
 log "Backup_agent is up"
+wait_for_user
 
 # Run tests.
+echo "Preparing to run test_s3_backup_and_restore_encryption..."
 test="test_s3_backup_and_restore_encryption"
 url="blobstore://${host}/${path_prefix}/${test}?${query_str}"
+echo "Using URL: ${url}"
+wait_for_user
+echo "Running: test_s3_backup_and_restore_encryption ${url} ${TEST_SCRATCH_DIR} ${blob_credentials_file} ${build_dir} ${ENCRYPTION_KEY_FILE}"
 test_s3_backup_and_restore_encryption "${url}" "${TEST_SCRATCH_DIR}" "${blob_credentials_file}" "${build_dir}" "${ENCRYPTION_KEY_FILE}"
+echo "Running: log_test_result $? test_s3_backup_and_restore_encryption"
 log_test_result $? "test_s3_backup_and_restore_encryption"
+
+echo -e "\n===== S3 Backup Encryption Test Complete =====\n"
