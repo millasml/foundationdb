@@ -93,7 +93,7 @@ class DecryptionStreamCipher final : NonCopyable, public ReferenceCounted<Decryp
 public:
 	DecryptionStreamCipher(const StreamCipherKey* key, const StreamCipher::IV& iv);
 	StringRef decrypt(unsigned char const* ciphertext, int len, Arena&);
-	StringRef finish(Arena&);
+	StringRef finish(unsigned char const* tagData, Arena&);
 };
 
 class HmacSha256StreamCipher final : NonCopyable, public ReferenceCounted<HmacSha256StreamCipher> {
