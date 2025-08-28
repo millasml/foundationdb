@@ -132,7 +132,17 @@ StringRef EncryptionStreamCipher::finish(Arena& arena) {
 	auto ciphertext = new (arena) unsigned char[AES_BLOCK_SIZE];
 	int bytes{ 0 };
 	EVP_EncryptFinal_ex(cipher.getCtx(), ciphertext, &bytes);
-	return StringRef(ciphertext, bytes);
+
+	// Get the 16-byte GCM tag
+	unsigned char* tag = new (arena) unsigned char[16];
+	EVP_CIPHER_CTX_ctrl(cipher.getCtx(), EVP_CTRL_GCM_GET_TAG, 16, tag);
+
+	// Allocate result buffer: [final ciphertext][tag]
+	auto output = new (arena) unsigned char[bytes + 16];
+	memcpy(output, ciphertext, bytes);     // Copy ciphertext first
+	memcpy(output + bytes, tag, 16);       // Then tag
+
+	return StringRef(output, bytes + 16);
 }
 
 DecryptionStreamCipher::DecryptionStreamCipher(const StreamCipherKey* key, const StreamCipher::IV& iv)
@@ -144,19 +154,32 @@ DecryptionStreamCipher::DecryptionStreamCipher(const StreamCipherKey* key, const
 
 StringRef DecryptionStreamCipher::decrypt(unsigned char const* ciphertext, int len, Arena& arena) {
 	CODE_PROBE(true, "Decrypting data with StreamCipher");
-	auto plaintext = new (arena) unsigned char[len];
+
+	auto plaintext = new (arena) unsigned char[len + AES_BLOCK_SIZE];
 	int bytesDecrypted{ 0 };
-	EVP_DecryptUpdate(cipher.getCtx(), plaintext, &bytesDecrypted, ciphertext, len);
-	int finalBlockBytes{ 0 };
-	EVP_DecryptFinal_ex(cipher.getCtx(), plaintext + bytesDecrypted, &finalBlockBytes);
-	return StringRef(plaintext, bytesDecrypted + finalBlockBytes);
+	if (len > 0) {
+		EVP_DecryptUpdate(cipher.getCtx(), plaintext, &bytesDecrypted, ciphertext, len);
+	}
+	
+	return StringRef(plaintext, bytesDecrypted);
 }
 
-StringRef DecryptionStreamCipher::finish(Arena& arena) {
+
+StringRef DecryptionStreamCipher::finish(unsigned char const* tagData, Arena& arena) {
 	auto plaintext = new (arena) unsigned char[AES_BLOCK_SIZE];
+	
+	// Set the expected tag BEFORE finalizing
+	EVP_CIPHER_CTX_ctrl(cipher.getCtx(), EVP_CTRL_GCM_SET_TAG, 16, (void*)tagData);
+	
 	int finalBlockBytes{ 0 };
-	EVP_DecryptFinal_ex(cipher.getCtx(), plaintext, &finalBlockBytes);
-	return StringRef(plaintext, finalBlockBytes);
+	int ret = EVP_DecryptFinal_ex(cipher.getCtx(), plaintext, &finalBlockBytes);
+	if (ret > 0) {
+		// Authenticated and successful
+		return StringRef(plaintext, finalBlockBytes);
+	} else {
+		// Auth failed
+		return StringRef();
+	}
 }
 
 HmacSha256StreamCipher::HmacSha256StreamCipher() : cipher(EVP_MAX_KEY_LENGTH) {
@@ -215,8 +238,11 @@ TEST_CASE("flow/StreamCipher") {
 		DecryptionStreamCipher decryptor(key, iv);
 		int index = 0;
 		int decryptedOffset = 0;
-		while (index < plaintext.size()) {
-			const auto chunkSize = std::min<int>(deterministicRandom()->randomInt(1, 101), plaintext.size() - index);
+		
+		// Process all but the last 16 bytes (which contain the tag)
+		int dataSize = ciphertext.size() - 16;
+		while (index < dataSize) {
+			const auto chunkSize = std::min<int>(deterministicRandom()->randomInt(1, 101), dataSize - index);
 			const auto decrypted = decryptor.decrypt(&ciphertext[index], chunkSize, arena);
 			TraceEvent("StreamCipherTestDecryptedChunk")
 			    .detail("DecryptedSize", decrypted.size())
@@ -226,10 +252,13 @@ TEST_CASE("flow/StreamCipher") {
 			decryptedOffset += decrypted.size();
 			index += chunkSize;
 		}
-		const auto decrypted = decryptor.finish(arena);
+		
+		// Extract the tag (last 16 bytes) and finish decryption
+		const auto decrypted = decryptor.finish(&ciphertext[dataSize], arena);
 		std::copy(decrypted.begin(), decrypted.end(), &decryptedtext[decryptedOffset]);
-		ASSERT_EQ(decryptedOffset + decrypted.size(), plaintext.size());
-		decryptedtext.resize(decryptedOffset + decrypted.size());
+		decryptedOffset += decrypted.size();
+		ASSERT_EQ(decryptedOffset, plaintext.size());
+		decryptedtext.resize(decryptedOffset);
 	}
 
 	ASSERT(plaintext == decryptedtext);
