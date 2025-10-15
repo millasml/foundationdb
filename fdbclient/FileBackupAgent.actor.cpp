@@ -1234,6 +1234,9 @@ ACTOR Future<Standalone<VectorRef<KeyValueRef>>> decodeRangeFileBlock(Reference<
                                                                       int len,
                                                                       Database cx) {
 	state Standalone<StringRef> buf = makeString(len);
+	state int64_t fileSize = wait(file->size());
+
+
 	int rLen = wait(uncancellable(holdWhile(buf, file->read(mutateString(buf), len, offset))));
 	if (rLen != len)
 		throw restore_bad_read();
@@ -3728,7 +3731,7 @@ struct RestoreRangeTaskFunc : RestoreFileTaskFuncBase {
 
 		state RestoreFile rangeFile = Params.inputFile().get(task);
 		state int64_t readOffset = Params.readOffset().get(task);
-		state int64_t readLen = Params.readLen().get(task);
+		// state int64_t readLen = Params.readLen().get(task);
 
 		TraceEvent("FileRestoreRangeStart")
 		    .suppressFor(60)
@@ -3737,7 +3740,7 @@ struct RestoreRangeTaskFunc : RestoreFileTaskFuncBase {
 		    .detail("FileVersion", rangeFile.version)
 		    .detail("FileSize", rangeFile.fileSize)
 		    .detail("ReadOffset", readOffset)
-		    .detail("ReadLen", readLen)
+		    // .detail("ReadLen", readLen)
 		    .detail("TaskInstance", THIS_ADDR);
 
 		state Reference<ReadYourWritesTransaction> tr(new ReadYourWritesTransaction(cx));
@@ -3769,6 +3772,7 @@ struct RestoreRangeTaskFunc : RestoreFileTaskFuncBase {
 		}
 
 		state Reference<IAsyncFile> inFile = wait(bc.get()->readFile(rangeFile.fileName));
+		state int64_t readLen = wait(inFile->size());
 		state Standalone<VectorRef<KeyValueRef>> blockData;
 		try {
 			Standalone<VectorRef<KeyValueRef>> data = wait(decodeRangeFileBlock(inFile, readOffset, readLen, cx));

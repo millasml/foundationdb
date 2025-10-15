@@ -28,6 +28,9 @@
 
 #include <array>
 
+// Size of the authentication tag in bytes for AES-GCM encryption
+constexpr int ENCRYPTION_AUTH_TAG_SIZE = 16;
+
 /*
  * Append-only file encrypted using AES-128-GCM.
  * */

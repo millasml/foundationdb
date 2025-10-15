@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT=`pwd`
 SERVER_COUNT=1
-PORT_PREFIX=1500
+# Use PORT_PREFIX environment variable if set, otherwise use default
+PORT_PREFIX=${PORT_PREFIX:-1500}
 
 # default cluster settings, override with options
 STATELESS_COUNT=4
@@ -130,9 +131,10 @@ else
 	usage
 fi
 
-DIR=./loopback-cluster
-rm -rf $DIR
-mkdir -p ${DIR}
+# Use LOOPBACK_DIR environment variable if set, otherwise use default
+DIR=${LOOPBACK_DIR:-./loopback-cluster}
+rm -rf "$DIR"
+mkdir -p "${DIR}"
 
 CLUSTER_FILE="test1:testdb1@127.0.0.1:$(( $PORT_PREFIX + 1))"
 CLUSTER=${DIR}/fdb.cluster
